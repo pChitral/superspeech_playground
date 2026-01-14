@@ -5,6 +5,14 @@ import tempfile
 import hashlib
 import json
 from pathlib import Path
+import shutil
+
+# Try to import pydub for audio conversion fallback
+try:
+    from pydub import AudioSegment
+    PYDUB_AVAILABLE = True
+except ImportError:
+    PYDUB_AVAILABLE = False
 
 # Static authentication credentials
 STATIC_USER_ID = "ldm"
@@ -63,31 +71,53 @@ def logout():
 
 
 def convert_to_wav(audio_bytes):
+    """Convert audio to WAV using ffmpeg or pydub fallback"""
     with tempfile.TemporaryDirectory() as tmpdir:
         input_file = Path(tmpdir) / "input.webm"
         output_file = Path(tmpdir) / "output.wav"
 
         input_file.write_bytes(audio_bytes.read())
 
-        subprocess.run(
-            [
-                "ffmpeg",
-                "-i",
-                str(input_file),
-                "-acodec",
-                "pcm_s16le",
-                "-ac",
-                "1",
-                "-ar",
-                "16000",
-                "-y",
-                str(output_file),
-            ],
-            capture_output=True,
-            check=True,
-        )
-
-        return output_file.read_bytes()
+        # Try ffmpeg first
+        if shutil.which("ffmpeg"):
+            try:
+                subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-i",
+                        str(input_file),
+                        "-acodec",
+                        "pcm_s16le",
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        "-y",
+                        str(output_file),
+                    ],
+                    capture_output=True,
+                    check=True,
+                )
+                return output_file.read_bytes()
+            except subprocess.CalledProcessError as e:
+                st.error(f"FFmpeg conversion failed: {e.stderr}")
+                return None
+        
+        # Fallback to pydub if ffmpeg not available
+        elif PYDUB_AVAILABLE:
+            try:
+                audio = AudioSegment.from_file(str(input_file))
+                audio = audio.set_frame_rate(16000).set_channels(1)
+                audio.export(str(output_file), format="wav")
+                return output_file.read_bytes()
+            except Exception as e:
+                st.error(f"Pydub conversion failed: {str(e)}")
+                return None
+        
+        else:
+            st.error("⚠️ Audio conversion not available. Please install ffmpeg or pydub.")
+            st.info("For Streamlit Cloud: Add 'ffmpeg' to packages.txt and 'pydub' to requirements.txt")
+            return None
 
 
 def call_api(audio_bytes, ref_text, core_type):
@@ -206,6 +236,9 @@ if ref_text:
     if audio and st.button("Analyze", type="primary"):
         with st.spinner("Processing..."):
             wav = convert_to_wav(audio)
+            if wav is None:
+                st.stop()  # Stop execution if audio conversion failed
+            
             result = call_api(wav, ref_text, core_type)
 
         st.json(result)
